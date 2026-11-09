@@ -64,6 +64,7 @@ try {
         exit;
     }
 } catch (Throwable $exception) {
+    error_log('Login database operation failed: ' . $exception->getMessage());
     http_response_code(500);
     echo json_encode([
         'success' => false,
