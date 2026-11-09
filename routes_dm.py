@@ -7,6 +7,268 @@ from db import q, q1, q1, safe_float, safe_int, get_db, _training_jobs
 
 dm_bp = Blueprint('dm', __name__)
 
+DM_RECORDS = {
+    "transactions": ("transactions", "transaction_id"),
+    "customers": ("customers", "customer_id"),
+    "branches": ("branches", "branch_id"),
+}
+_purge_lock = threading.Lock()
+_lifecycle_schema_lock = threading.Lock()
+_lifecycle_table_ready = False
+
+
+def _ensure_lifecycle_table():
+    global _lifecycle_table_ready
+    if _lifecycle_table_ready:
+        return
+    with _lifecycle_schema_lock:
+        if _lifecycle_table_ready:
+            return
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS dm_record_lifecycle (
+                    entity_type VARCHAR(20) NOT NULL,
+                    record_id INT NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    delete_after DATETIME DEFAULT NULL,
+                    PRIMARY KEY (entity_type, record_id),
+                    KEY idx_dm_lifecycle_deletion (status, delete_after)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            _lifecycle_table_ready = True
+        finally:
+            cur.close()
+            conn.close()
+
+
+def _purge_expired_records():
+    with _purge_lock:
+        conn = get_db()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("""
+                SELECT entity_type, record_id
+                FROM dm_record_lifecycle
+                WHERE status = 'pending_delete' AND delete_after <= UTC_TIMESTAMP()
+                ORDER BY delete_after
+                LIMIT 100
+            """)
+            due_records = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+        for item in due_records:
+            entity = item["entity_type"]
+            record_id = item["record_id"]
+            if entity not in DM_RECORDS:
+                raise ValueError(f"Unknown data-management entity in lifecycle table: {entity}")
+
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                conn.start_transaction()
+                cur.execute(
+                    """
+                    SELECT status, delete_after
+                    FROM dm_record_lifecycle
+                    WHERE entity_type = %s AND record_id = %s
+                      AND status = 'pending_delete'
+                      AND delete_after <= UTC_TIMESTAMP()
+                    FOR UPDATE
+                    """,
+                    (entity, record_id),
+                )
+                lifecycle = cur.fetchone()
+                if not lifecycle:
+                    conn.commit()
+                    continue
+
+                if entity == "transactions":
+                    for child_table in (
+                        "payment_bank_transfer",
+                        "payment_card",
+                        "payment_cash",
+                        "payment_check",
+                        "payment_customer_deposit",
+                        "payment_multi_splits",
+                        "payment_qr",
+                    ):
+                        cur.execute(
+                            f"DELETE FROM {child_table} WHERE transaction_id = %s",
+                            (record_id,),
+                        )
+                elif entity == "customers":
+                    cur.execute(
+                        "UPDATE transactions SET customer_id = NULL WHERE customer_id = %s",
+                        (record_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE transactions SET branch_id = NULL WHERE branch_id = %s",
+                        (record_id,),
+                    )
+                    cur.execute("DELETE FROM daily_sales_summary WHERE branch_id = %s", (record_id,))
+                    cur.execute("DELETE FROM forecast_predictions WHERE branch_id = %s", (record_id,))
+                    cur.execute("UPDATE forecast_runs SET branch_id = NULL WHERE branch_id = %s", (record_id,))
+                    cur.execute("UPDATE alert_rules SET branch_id = NULL WHERE branch_id = %s", (record_id,))
+                    cur.execute("UPDATE discount_impact_scores SET branch_id = NULL WHERE branch_id = %s", (record_id,))
+
+                table, pk = DM_RECORDS[entity]
+                cur.execute(f"DELETE FROM {table} WHERE {pk} = %s", (record_id,))
+                cur.execute(
+                    "DELETE FROM dm_record_lifecycle WHERE entity_type = %s AND record_id = %s",
+                    (entity, record_id),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
+                conn.close()
+
+
+@dm_bp.before_request
+def maintain_data_management_records():
+    _ensure_lifecycle_table()
+    _purge_expired_records()
+
+
+def _set_record_lifecycle(entity, record_ids, status):
+    if entity not in DM_RECORDS:
+        return 0
+    ids = list(dict.fromkeys(int(record_id) for record_id in record_ids if int(record_id) > 0))
+    if not ids:
+        return 0
+
+    table, pk = DM_RECORDS[entity]
+    placeholders = ",".join(["%s"] * len(ids))
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT {pk} FROM {table} WHERE {pk} IN ({placeholders})",
+            ids,
+        )
+        existing_ids = [row[0] for row in cur.fetchall()]
+        if not existing_ids:
+            return 0
+
+        values = ",".join(["(%s, %s, %s, UTC_TIMESTAMP(), " +
+                           ("DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 DAY)" if status == "pending_delete" else "NULL") +
+                           ")"] * len(existing_ids))
+        params = []
+        for record_id in existing_ids:
+            params.extend((entity, record_id, status))
+        cur.execute(f"""
+            INSERT INTO dm_record_lifecycle
+                (entity_type, record_id, status, created_at, delete_after)
+            VALUES {values}
+            ON DUPLICATE KEY UPDATE
+                status = VALUES(status),
+                created_at = VALUES(created_at),
+                delete_after = VALUES(delete_after)
+        """, params)
+        conn.commit()
+        return len(existing_ids)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+@dm_bp.route("/api/dm/archive", methods=["GET"])
+def dm_archive_list():
+    page = max(1, safe_int(request.args.get("page", 1)))
+    per_page = min(100, max(5, safe_int(request.args.get("per_page", 20))))
+    search = request.args.get("search", "").strip()
+    offset = (page - 1) * per_page
+    archive_sql = """
+        SELECT l.entity_type, l.record_id, l.status, l.created_at, l.delete_after,
+               COALESCE(NULLIF(t.invoice_number, ''), CONCAT('Transaction #', l.record_id)) AS record_label
+        FROM dm_record_lifecycle l
+        LEFT JOIN transactions t ON l.entity_type = 'transactions' AND t.transaction_id = l.record_id
+        WHERE l.entity_type = 'transactions'
+        UNION ALL
+        SELECT l.entity_type, l.record_id, l.status, l.created_at, l.delete_after, c.full_name AS record_label
+        FROM dm_record_lifecycle l
+        LEFT JOIN customers c ON l.entity_type = 'customers' AND c.customer_id = l.record_id
+        WHERE l.entity_type = 'customers'
+        UNION ALL
+        SELECT l.entity_type, l.record_id, l.status, l.created_at, l.delete_after, b.branch_name AS record_label
+        FROM dm_record_lifecycle l
+        LEFT JOIN branches b ON l.entity_type = 'branches' AND b.branch_id = l.record_id
+        WHERE l.entity_type = 'branches'
+    """
+    where_sql = ""
+    params = []
+    if search:
+        where_sql = "WHERE record_label LIKE %s OR entity_type LIKE %s OR status LIKE %s"
+        like = f"%{search}%"
+        params = [like, like, like]
+
+    total = q1(
+        f"SELECT COUNT(*) AS cnt FROM ({archive_sql}) archived_records {where_sql}",
+        params,
+    )["cnt"]
+    rows = q(
+        f"""
+        SELECT entity_type, record_id, status, created_at, delete_after, record_label
+        FROM ({archive_sql}) archived_records
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        params + [per_page, offset],
+    )
+    return jsonify({
+        "rows": [{
+            **row,
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "delete_after": row["delete_after"].isoformat() if row["delete_after"] else None,
+        } for row in rows],
+        "total": safe_int(total),
+    })
+
+
+@dm_bp.route("/api/dm/<entity>/<int:pk>/archive", methods=["POST"])
+def dm_record_archive(entity, pk):
+    affected = _set_record_lifecycle(entity, [pk], "archived")
+    if not affected:
+        return jsonify({"error": "Record not found"}), 404
+    return jsonify({"archived": pk})
+
+
+@dm_bp.route("/api/dm/archive/<entity>/<int:pk>/restore", methods=["POST"])
+def dm_record_restore(entity, pk):
+    if entity not in DM_RECORDS:
+        return jsonify({"error": "Unknown record type"}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "DELETE FROM dm_record_lifecycle WHERE entity_type = %s AND record_id = %s",
+            (entity, pk),
+        )
+        restored = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+    if not restored:
+        return jsonify({"error": "Archived record not found"}), 404
+    return jsonify({"restored": pk})
+
+
 def dm_exec(sql, params=None):
     """Execute INSERT / UPDATE / DELETE and return lastrowid + rowcount."""
     conn = get_db()
@@ -680,7 +942,10 @@ def dm_transactions_list():
         sort = 'transaction_id'
 
     offset = (page - 1) * per_page
-    where_clauses = []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'transactions' AND l.record_id = t.transaction_id)"
+    ]
     params = []
 
     if search:
@@ -841,10 +1106,10 @@ def dm_transaction_update(pk):
 
 @dm_bp.route("/api/dm/transactions/<int:pk>", methods=["DELETE"])
 def dm_transaction_delete(pk):
-    _, affected = dm_exec("DELETE FROM transactions WHERE transaction_id = %s", (pk,))
-    if affected == 0:
+    affected = _set_record_lifecycle("transactions", [pk], "pending_delete")
+    if not affected:
         return jsonify({"error": "Not found"}), 404
-    return jsonify({"deleted": pk})
+    return jsonify({"scheduled": pk, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/transactions/bulk-delete", methods=["POST"])
@@ -852,9 +1117,8 @@ def dm_transaction_bulk_delete():
     ids = request.get_json(force=True).get("ids", [])
     if not ids:
         return jsonify({"error": "No IDs provided"}), 400
-    placeholders = ",".join(["%s"] * len(ids))
-    _, affected = dm_exec(f"DELETE FROM transactions WHERE transaction_id IN ({placeholders})", ids)
-    return jsonify({"deleted": affected})
+    affected = _set_record_lifecycle("transactions", ids, "pending_delete")
+    return jsonify({"scheduled": affected, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/transactions/export")
@@ -863,7 +1127,11 @@ def dm_transaction_export():
     branch_id = request.args.get('branch_id', '')
     status    = request.args.get('status',    '')
 
-    where_clauses, params = [], []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'transactions' AND l.record_id = t.transaction_id)"
+    ]
+    params = []
     if search:
         like = f"%{search}%"
         where_clauses.append("(t.invoice_number LIKE %s OR c.full_name LIKE %s OR b.branch_name LIKE %s)")
@@ -959,7 +1227,11 @@ def dm_customers_list():
         direction = 'ASC'
 
     offset = (page - 1) * per_page
-    where_clauses, params = [], []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'customers' AND l.record_id = customers.customer_id)"
+    ]
+    params = []
 
     if search:
         like = f"%{search}%"
@@ -1026,13 +1298,10 @@ def dm_customer_update(pk):
 
 @dm_bp.route("/api/dm/customers/<int:pk>", methods=["DELETE"])
 def dm_customer_delete(pk):
-    try:
-        _, affected = dm_exec("DELETE FROM customers WHERE customer_id = %s", (pk,))
-        if affected == 0:
-            return jsonify({"error": "Not found"}), 404
-        return jsonify({"deleted": pk})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    affected = _set_record_lifecycle("customers", [pk], "pending_delete")
+    if not affected:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"scheduled": pk, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/customers/bulk-delete", methods=["POST"])
@@ -1040,15 +1309,18 @@ def dm_customer_bulk_delete():
     ids = request.get_json(force=True).get("ids", [])
     if not ids:
         return jsonify({"error": "No IDs provided"}), 400
-    placeholders = ",".join(["%s"] * len(ids))
-    _, affected = dm_exec(f"DELETE FROM customers WHERE customer_id IN ({placeholders})", ids)
-    return jsonify({"deleted": affected})
+    affected = _set_record_lifecycle("customers", ids, "pending_delete")
+    return jsonify({"scheduled": affected, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/customers/export")
 def dm_customer_export():
     search = request.args.get('search', '').strip()
-    where_clauses, params = [], []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'customers' AND l.record_id = customers.customer_id)"
+    ]
+    params = []
     if search:
         like = f"%{search}%"
         where_clauses.append("(full_name LIKE %s OR contact LIKE %s OR address LIKE %s)")
@@ -1100,7 +1372,11 @@ def dm_branches_list():
         direction = 'ASC'
 
     offset = (page - 1) * per_page
-    where_clauses, params = [], []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'branches' AND l.record_id = branches.branch_id)"
+    ]
+    params = []
 
     if search:
         like = f"%{search}%"
@@ -1171,13 +1447,10 @@ def dm_branch_update(pk):
 
 @dm_bp.route("/api/dm/branches/<int:pk>", methods=["DELETE"])
 def dm_branch_delete(pk):
-    try:
-        _, affected = dm_exec("DELETE FROM branches WHERE branch_id = %s", (pk,))
-        if affected == 0:
-            return jsonify({"error": "Not found"}), 404
-        return jsonify({"deleted": pk})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    affected = _set_record_lifecycle("branches", [pk], "pending_delete")
+    if not affected:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"scheduled": pk, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/branches/bulk-delete", methods=["POST"])
@@ -1185,19 +1458,19 @@ def dm_branch_bulk_delete():
     ids = request.get_json(force=True).get("ids", [])
     if not ids:
         return jsonify({"error": "No IDs provided"}), 400
-    placeholders = ",".join(["%s"] * len(ids))
-    try:
-        _, affected = dm_exec(f"DELETE FROM branches WHERE branch_id IN ({placeholders})", ids)
-        return jsonify({"deleted": affected})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    affected = _set_record_lifecycle("branches", ids, "pending_delete")
+    return jsonify({"scheduled": affected, "delete_in_days": 30})
 
 
 @dm_bp.route("/api/dm/branches/export")
 def dm_branch_export():
     search    = request.args.get('search',    '').strip()
     is_active = request.args.get('is_active', '')
-    where_clauses, params = [], []
+    where_clauses = [
+        "NOT EXISTS (SELECT 1 FROM dm_record_lifecycle l "
+        "WHERE l.entity_type = 'branches' AND l.record_id = branches.branch_id)"
+    ]
+    params = []
     if search:
         like = f"%{search}%"
         where_clauses.append("(branch_name LIKE %s OR city LIKE %s OR region LIKE %s)")

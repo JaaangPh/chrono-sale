@@ -59,6 +59,7 @@ $ALLOWED = [
     'dm/branches/export'      => ['path' => '/api/dm/branches/export',      'csv' => true,  'methods' => ['GET']],
     'dm/branches/import'      => ['path' => '/api/dm/branches/import',      'csv' => false, 'methods' => ['POST']],
     'dm/branches/bulk-delete' => ['path' => '/api/dm/branches/bulk-delete', 'csv' => false, 'methods' => ['POST']],
+    'dm/archive'              => ['path' => '/api/dm/archive',              'csv' => false, 'methods' => ['GET']],
 
    // Dataset CSV Upload (transactions normalisation)
     'dm/dataset/preview' => ['path' => '/api/dm/dataset/preview', 'csv' => false, 'methods' => ['POST']],
@@ -89,7 +90,13 @@ $ALLOWED = [
 $endpoint = $_GET['endpoint'] ?? '';
 
 if (!array_key_exists($endpoint, $ALLOWED)) {
-    if (preg_match('#^ml/stream/([a-f0-9\-]{36})$#', $endpoint, $m)) {
+    if (preg_match('#^dm/(transactions|customers|branches)/(\d+)/archive$#', $endpoint, $m)) {
+        $config = ['path' => '/api/dm/' . $m[1] . '/' . $m[2] . '/archive', 'csv' => false, 'methods' => ['POST']];
+    } elseif (preg_match('#^dm/archive/(transactions|customers|branches)/(\d+)/restore$#', $endpoint, $m)) {
+        $config = ['path' => '/api/dm/archive/' . $m[1] . '/' . $m[2] . '/restore', 'csv' => false, 'methods' => ['POST']];
+    } elseif (preg_match('#^dm/(transactions|customers|branches)/(\d+)$#', $endpoint, $m)) {
+        $config = ['path' => '/api/dm/' . $m[1] . '/' . $m[2], 'csv' => false, 'methods' => ['GET','PUT','DELETE']];
+    } elseif (preg_match('#^ml/stream/([a-f0-9\-]{36})$#', $endpoint, $m)) {
         $config = ['path' => '/api/ml/stream/' . $m[1], 'csv' => false, 'methods' => ['GET'], 'stream' => true];
     } elseif (preg_match('#^ml/cancel/([a-f0-9\-]{36})$#', $endpoint, $m)) {
         $config = ['path' => '/api/ml/cancel/' . $m[1], 'csv' => false, 'methods' => ['POST'], 'stream' => false];

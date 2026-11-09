@@ -72,10 +72,13 @@
 
 ### Data Management (`data-management.php`)
 - Admin interface for managing all sales data
-- Tabs for Transactions, Customers, Branches
-- Add, edit, delete, and bulk import/export records (CSV)
+- Tabs for Transactions, Customers, Branches, and Archive
+- Add and bulk import/export records (CSV); row actions include View and Archive
+- Deletion is scheduled for 30 days later; records can be restored from Archive before the deadline
+- Expired records are permanently purged on the next Data Management request (including after an idle/sleep period)
+- The Flask API creates the record-lifecycle table automatically when Data Management is first used
 - Search, filter, and sort records
-- Bulk actions (delete, import)
+- Bulk deletion schedules records for the same 30-day retention period
 - Data validation and error reporting
 - Audit log and integrity checks
 

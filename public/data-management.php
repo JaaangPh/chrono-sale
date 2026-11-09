@@ -145,6 +145,10 @@ $user_role = $_SESSION['user_role'] ?? 'Admin';
         .icon-btn.edit:hover { background: var(--primary); color: #fff; }
         .icon-btn.del { background: var(--danger-light); color: var(--danger); }
         .icon-btn.del:hover { background: var(--danger); color: #fff; }
+        .icon-btn.archive { background: var(--accent-light); color: #92400e; }
+        .icon-btn.archive:hover { background: #f59e0b; color: #fff; }
+        .icon-btn.restore { background: var(--success-light); color: var(--success); }
+        .icon-btn.restore:hover { background: var(--success); color: #fff; }
         .icon-btn.view { background: var(--violet-light); color: var(--violet); }
         .icon-btn.view:hover { background: var(--violet); color: #fff; }
 
@@ -484,7 +488,7 @@ $user_role = $_SESSION['user_role'] ?? 'Admin';
                     <i class="fa-solid fa-database" style="color:var(--primary-mid);margin-right:8px;"></i>
                     Data Management
                 </div>
-                <p style="font-size:13px;color:var(--ink-3);">Create, edit, delete, and import records across all datasets. Changes are written directly to the database.</p>
+                <p style="font-size:13px;color:var(--ink-3);">Manage records across datasets, archive items, or schedule permanent deletion after 30 days.</p>
             </div>
 
             <!-- Dataset Tabs -->
@@ -500,6 +504,10 @@ $user_role = $_SESSION['user_role'] ?? 'Admin';
                 <button class="dm-tab" data-tab="branches" onclick="switchTab('branches')">
                     <i class="fa-solid fa-store"></i> Branches
                     <span class="count-badge" id="tab-count-branches">—</span>
+                </button>
+                <button class="dm-tab" data-tab="archive" onclick="switchTab('archive')">
+                    <i class="fa-solid fa-box-archive"></i> Archive
+                    <span class="count-badge" id="tab-count-archive">—</span>
                 </button>
             </div>
 
@@ -524,11 +532,11 @@ $user_role = $_SESSION['user_role'] ?? 'Admin';
                 <!-- Per-tab filters injected here -->
                 <div id="tabFilters"></div>
 
-                <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                    <button class="btn-secondary" onclick="openImportModal()">
+                <div id="toolbarActions" style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <button class="btn-secondary" id="importBtn" onclick="openImportModal()">
                         <i class="fa-solid fa-file-arrow-up"></i> Import CSV / XLSX
                     </button>
-                    <button class="btn-secondary" onclick="exportCSV()">
+                    <button class="btn-secondary" id="exportBtn" onclick="exportCSV()">
                         <i class="fa-solid fa-file-arrow-down"></i> Export
                     </button>
                     <button class="btn-primary" id="addNewBtn" onclick="openAddModal()">
@@ -600,7 +608,7 @@ $user_role = $_SESSION['user_role'] ?? 'Admin';
         </div>
         <div class="modal-footer">
             <button class="btn-secondary" onclick="closeConfirmModal()">Cancel</button>
-            <button class="btn-danger" id="confirmDeleteBtn"><i class="fa-solid fa-trash"></i> Delete</button>
+            <button class="btn-danger" id="confirmDeleteBtn"><i class="fa-solid fa-trash"></i> Schedule Delete</button>
         </div>
     </div>
 </div>
@@ -737,6 +745,7 @@ let state = {
     total:        0,
     editId:       null,
     deleteId:     null,
+    deleteEntity: null,
     isBulkDelete: false,
     selected:     new Set(),
     importRows:   [],
@@ -817,8 +826,10 @@ function switchTab(tab) {
     state.filters = {};
     state.selected.clear();
     document.getElementById('searchInput').value = '';
-    document.getElementById('activeTabLabel').textContent = TABS[tab].label;
+    document.getElementById('activeTabLabel').textContent = tab === 'archive' ? 'Archive' : TABS[tab].label;
     document.querySelectorAll('.dm-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.getElementById('toolbarActions').style.display = tab === 'archive' ? 'none' : 'flex';
+    document.getElementById('searchInput').placeholder = tab === 'archive' ? 'Search archived records…' : 'Search records…';
     renderTabFilters();
     renderBulkBar();
     loadData();
@@ -868,6 +879,10 @@ function onSearch() {
 /* ── Load data from API ───────────────────────────────────── */
 async function loadData() {
     showLoading(true);
+    if (state.tab === 'archive') {
+        await loadArchiveData();
+        return;
+    }
     const tab  = TABS[state.tab];
     const params = new URLSearchParams({
         page:    state.page,
@@ -893,12 +908,65 @@ async function loadData() {
     showLoading(false);
 }
 
+async function loadArchiveData() {
+    const params = new URLSearchParams({
+        page: state.page,
+        per_page: state.perPage,
+        search: state.search,
+    });
+    try {
+        const r = await fetch(`${API}?endpoint=dm/archive&${params}`);
+        if (!r.ok) throw new Error('Server error');
+        const d = await r.json();
+        state.data = d.rows || [];
+        state.total = d.total || 0;
+        document.getElementById('tab-count-archive').textContent = state.total;
+    } catch (e) {
+        state.data = [];
+        state.total = 0;
+        showToast('Failed to load archive: ' + e.message, 'error');
+    }
+    renderTable();
+    renderPagination();
+    showLoading(false);
+}
+
 /* ── Render table ─────────────────────────────────────────── */
 function renderTable() {
-    const cfg  = TABS[state.tab];
     const head = document.getElementById('dmTableHead');
     const body = document.getElementById('dmTableBody');
 
+    if (state.tab === 'archive') {
+        head.innerHTML = `<tr>
+            <th>Type</th><th>Record</th><th>Status</th><th>Archived / Scheduled On</th><th>Delete After</th><th>Actions</th>
+        </tr>`;
+        if (!state.data.length) {
+            body.innerHTML = `<tr><td colspan="6"><div class="empty-state"><i class="fa-solid fa-box-open"></i><strong>Archive is empty</strong><p>Archived and scheduled-for-deletion records will appear here.</p></div></td></tr>`;
+            return;
+        }
+        body.innerHTML = state.data.map(row => {
+            const pending = row.status === 'pending_delete';
+            const createdAt = row.created_at ? new Date(row.created_at).toLocaleString() : '—';
+            const deleteAfter = row.delete_after ? new Date(row.delete_after).toLocaleString() : 'Not scheduled';
+            const status = pending
+                ? '<span class="status-badge void">Deletion scheduled</span>'
+                : '<span class="status-badge inactive">Archived</span>';
+            return `<tr>
+                <td>${escapeHtml(row.entity_type)}</td>
+                <td>${escapeHtml(row.record_label || `Record #${row.record_id}`)}</td>
+                <td>${status}</td>
+                <td>${escapeHtml(createdAt)}</td>
+                <td>${escapeHtml(deleteAfter)}</td>
+                <td><div class="action-btns">
+                    <button class="icon-btn restore" onclick="restoreRecord('${row.entity_type}',${row.record_id})" title="Restore"><i class="fa-solid fa-rotate-left"></i></button>
+                    ${pending ? '' : `<button class="icon-btn del" onclick="confirmArchiveDelete('${row.entity_type}',${row.record_id})" title="Schedule Delete"><i class="fa-solid fa-trash"></i></button>`}
+                </div></td>
+            </tr>`;
+        }).join('');
+        return;
+    }
+
+    const cfg  = TABS[state.tab];
     head.innerHTML = `<tr>
         <th class="cb-wrap" style="width:36px;">
             <input type="checkbox" class="row-cb" id="selectAll" onchange="toggleSelectAll(this.checked)">
@@ -932,7 +1000,7 @@ function renderTable() {
                 if (c.key === '_actions') return `<td>
                     <div class="action-btns">
                         <button class="icon-btn view" onclick="viewRecord(${pk})" title="View"><i class="fa-solid fa-eye"></i></button>
-                        <button class="icon-btn edit" onclick="editRecord(${pk})" title="Edit"><i class="fa-solid fa-pen"></i></button>
+                        <button class="icon-btn archive" onclick="archiveRecord('${state.tab}',${pk})" title="Archive"><i class="fa-solid fa-box-archive"></i></button>
                         <button class="icon-btn del"  onclick="confirmDelete(${pk})" title="Delete"><i class="fa-solid fa-trash"></i></button>
                     </div>
                 </td>`;
@@ -945,6 +1013,12 @@ function renderTable() {
             }).join('')}
         </tr>`;
     }).join('');
+}
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[char]);
 }
 
 function statusBadge(s) {
@@ -1016,7 +1090,7 @@ function clearSelection() {
 function renderBulkBar() {
     const bar = document.getElementById('bulkBar');
     const n   = state.selected.size;
-    bar.classList.toggle('show', n > 0);
+    bar.classList.toggle('show', n > 0 && state.tab !== 'archive');
     document.getElementById('bulkCount').textContent = n;
 }
 
@@ -1290,17 +1364,40 @@ async function submitForm() {
 }
 
 /* ── Delete ───────────────────────────────────────────────── */
+function deletionImpact(entity) {
+    if (entity === 'branches') {
+        return ' Branch summaries and forecasts are also removed; historical transactions remain but are unlinked from the branch.';
+    }
+    if (entity === 'customers') {
+        return ' Historical transactions remain but are unlinked from the customer.';
+    }
+    return ' The transaction’s payment details are removed with it.';
+}
+
 function confirmDelete(pk) {
     state.deleteId    = pk;
+    state.deleteEntity = state.tab;
     state.isBulkDelete = false;
-    document.getElementById('confirmMsg').textContent = `Delete record #${pk}? This cannot be undone.`;
+    document.getElementById('confirmMsg').textContent =
+        `Record #${pk} will be hidden now and permanently deleted after 30 days. You can restore it from Archive before then.${deletionImpact(state.deleteEntity)} If the service is idle on the due date, cleanup runs on its next Data Management request.`;
+    document.getElementById('confirmDeleteBtn').onclick = doDelete;
+    document.getElementById('confirmModalOverlay').classList.add('open');
+}
+
+function confirmArchiveDelete(entity, pk) {
+    state.deleteId = pk;
+    state.deleteEntity = entity;
+    state.isBulkDelete = false;
+    document.getElementById('confirmMsg').textContent =
+        `Archived record #${pk} will be permanently deleted after 30 days. You can restore it from Archive before the deadline.${deletionImpact(entity)} If the service is idle on the due date, cleanup runs on its next Data Management request.`;
     document.getElementById('confirmDeleteBtn').onclick = doDelete;
     document.getElementById('confirmModalOverlay').classList.add('open');
 }
 
 function confirmBulkDelete() {
     state.isBulkDelete = true;
-    document.getElementById('confirmMsg').textContent = `Delete ${state.selected.size} selected record(s)? This cannot be undone.`;
+    document.getElementById('confirmMsg').textContent =
+        `${state.selected.size} selected record(s) will be hidden now and permanently deleted after 30 days. You can restore them from Archive before then. If the service is idle on the due date, cleanup runs on its next Data Management request.`;
     document.getElementById('confirmDeleteBtn').onclick = doBulkDelete;
     document.getElementById('confirmModalOverlay').classList.add('open');
 }
@@ -1309,11 +1406,12 @@ function closeConfirmModal() { document.getElementById('confirmModalOverlay').cl
 
 async function doDelete() {
     closeConfirmModal();
-    const cfg = TABS[state.tab];
     try {
-        const r = await fetch(`${API}?endpoint=${cfg.endpoint}/${state.deleteId}`, { method: 'DELETE' });
-        if (!r.ok) throw new Error('Delete failed');
-        showToast('Record deleted.', 'success');
+        const r = await fetch(`${API}?endpoint=dm/${state.deleteEntity}/${state.deleteId}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error('Could not schedule deletion');
+        showToast('Deletion scheduled for 30 days from now. You can restore it from Archive.', 'success');
+        state.selected.delete(state.deleteId);
+        renderBulkBar();
         await loadData();
     } catch(e) {
         showToast('Delete failed: ' + e.message, 'error');
@@ -1330,12 +1428,37 @@ async function doBulkDelete() {
             headers: {'Content-Type':'application/json'},
             body: JSON.stringify({ ids }),
         });
-        if (!r.ok) throw new Error('Bulk delete failed');
-        showToast(`${ids.length} record(s) deleted.`, 'success');
+        if (!r.ok) throw new Error('Could not schedule deletion');
+        showToast(`${ids.length} record(s) scheduled for deletion in 30 days.`, 'success');
         state.selected.clear();
+        renderBulkBar();
         await loadData();
     } catch(e) {
         showToast('Bulk delete failed: ' + e.message, 'error');
+    }
+}
+
+async function archiveRecord(entity, pk) {
+    try {
+        const r = await fetch(`${API}?endpoint=dm/${entity}/${pk}/archive`, { method: 'POST' });
+        if (!r.ok) throw new Error('Could not archive record');
+        showToast('Record moved to Archive.', 'success');
+        state.selected.delete(pk);
+        renderBulkBar();
+        await loadData();
+    } catch (e) {
+        showToast('Archive failed: ' + e.message, 'error');
+    }
+}
+
+async function restoreRecord(entity, pk) {
+    try {
+        const r = await fetch(`${API}?endpoint=dm/archive/${entity}/${pk}/restore`, { method: 'POST' });
+        if (!r.ok) throw new Error('Could not restore record');
+        showToast('Record restored.', 'success');
+        await loadData();
+    } catch (e) {
+        showToast('Restore failed: ' + e.message, 'error');
     }
 }
 
