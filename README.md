@@ -149,19 +149,19 @@ spreadsheets, and environment files.
 
 ### 2. Create the Flask API service
 
-1. Create a second service from the same GitHub repository. Choose a **Private
-   Service** (not a public web service), select Docker, and set the Dockerfile
+1. Create a second **Web Service** from the same GitHub repository, select
+   Docker, and set the Dockerfile
    path to `Dockerfile.python` with build context `.`.
 2. Use the same region as the PHP service so the services can communicate over
-   Render's private network.
-3. Keep the Flask service private. The API does not independently authenticate
-   requests; making it public would expose its endpoints.
-4. Copy the Flask service's internal address from its Render dashboard. Set the
-   PHP service's `FLASK_BASE` to that address, including `http://` and the
-   service port if shown (for example, `http://service-name:10000`).
-
-Private services may require a paid Render plan. Don't replace this with a
-public API URL unless API authentication is added first.
+   Render's network.
+3. Generate a long random secret in Render, then set the same
+   `FLASK_API_SECRET` value on both the PHP and Flask services. The PHP proxy
+   sends it as a server-to-server header; the Flask API rejects requests
+   without the matching secret. Never put this value in frontend code or Git.
+4. Copy the Flask service's public `https://...onrender.com` URL and set the
+   PHP service's `FLASK_BASE` to that URL. This public-web-service option can
+   use Render's free web-service plan, but free services may spin down when idle.
+   Keep the shared secret set on both services even though Flask has a public URL.
 
 ### 3. Configure MySQL
 
@@ -180,6 +180,7 @@ variables on **both** Render application services:
 | `DB_USER` | Database username |
 | `DB_PASSWORD` | Database password |
 | `DB_SSL_CA` | Path to the provider's CA certificate file, when TLS verification is required |
+| `FLASK_API_SECRET` | Long random shared secret; use the exact same value on both app services |
 
 If the database provider requires a CA certificate, add it as a Render **Secret
 File** on both services and set `DB_SSL_CA` to the mounted file path. For
@@ -187,8 +188,10 @@ example, if the secret file is mounted at `/etc/secrets/ca.pem`, use that path
 as the variable value. This enables CA and server-identity verification for
 both the PHP and Python database connections.
 
+Set `FLASK_BASE` on the PHP service to the Flask service's public HTTPS URL.
 Use Render's environment-variable dashboard for credentials. Do not put
-passwords, connection URLs, or certificate contents in GitHub or this README.
+passwords, shared secrets, connection URLs, or certificate contents in GitHub
+or this README.
 
 ### 4. Import and secure the database
 

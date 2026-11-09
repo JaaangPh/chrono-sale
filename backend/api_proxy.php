@@ -9,6 +9,13 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 $FLASK_BASE = rtrim(getenv('FLASK_BASE') ?: 'http://127.0.0.1:8800', '/');
+$flaskApiSecret = getenv('FLASK_API_SECRET') ?: '';
+if ($flaskApiSecret === '') {
+    http_response_code(503);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Flask API authentication is not configured.']);
+    exit;
+}
 
 $ALLOWED = [
     'dashboard'              => ['path' => '/api/dashboard',             'csv' => false, 'methods' => ['GET']],
@@ -124,8 +131,9 @@ if (!empty($forwardParams)) {
 $ctxOptions = [
     'http' => [
         'method'        => $method,
-        'timeout'       => 15,
+        'timeout'       => 120,
         'ignore_errors' => true,
+        'header'        => "X-Internal-Api-Key: " . $flaskApiSecret . "\r\n",
     ]
 ];
 
@@ -152,6 +160,7 @@ if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'])) {
                 CURLOPT_CUSTOMREQUEST  => $method,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_TIMEOUT        => $timeout,
+                CURLOPT_HTTPHEADER     => ['X-Internal-Api-Key: ' . $flaskApiSecret],
                 CURLOPT_POSTFIELDS     => [
                     'file' => new CURLFile(
                         $_FILES['file']['tmp_name'],
@@ -170,11 +179,11 @@ if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'])) {
         }
         $rawBody = file_get_contents('php://input');
         $ctxOptions['http']['content'] = $rawBody;
-        $ctxOptions['http']['header']  = "Content-Type: " . $contentType . "\r\n";
+        $ctxOptions['http']['header'] .= "Content-Type: " . $contentType . "\r\n";
     } else {
         $rawBody = file_get_contents('php://input');
         $ctxOptions['http']['content'] = $rawBody;
-        $ctxOptions['http']['header']  = "Content-Type: application/json\r\n";
+        $ctxOptions['http']['header'] .= "Content-Type: application/json\r\n";
     }
 }
 
@@ -192,7 +201,11 @@ if (!empty($config['stream'])) {
         CURLOPT_TIMEOUT         => 300,
         CURLOPT_CONNECTTIMEOUT  => 10,
         CURLOPT_FOLLOWLOCATION  => false,
-        CURLOPT_HTTPHEADER      => ['Accept: text/event-stream', 'Cache-Control: no-cache'],
+        CURLOPT_HTTPHEADER      => [
+            'Accept: text/event-stream',
+            'Cache-Control: no-cache',
+            'X-Internal-Api-Key: ' . $flaskApiSecret,
+        ],
         CURLOPT_WRITEFUNCTION   => function($curl, $chunk) {
             echo $chunk;
             if (ob_get_level() > 0) ob_flush();

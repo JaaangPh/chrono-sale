@@ -1,4 +1,7 @@
-from flask import Flask
+import hmac
+import os
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from db import (get_db, q, q1, safe_float, safe_int,
                 parse_date_params, parse_report_dates,
@@ -7,6 +10,15 @@ from db import (get_db, q, q1, safe_float, safe_int,
 app = Flask(__name__)
 CORS(app, origins=["http://localhost", "http://127.0.0.1",
                    "http://localhost:3000", "http://127.0.0.1:3000"])
+
+@app.before_request
+def require_internal_api_secret():
+    expected_secret = os.getenv("FLASK_API_SECRET", "")
+    supplied_secret = request.headers.get("X-Internal-Api-Key", "")
+    if not expected_secret:
+        return jsonify({"error": "API authentication is not configured"}), 503
+    if not hmac.compare_digest(supplied_secret, expected_secret):
+        return jsonify({"error": "Unauthorized"}), 401
 
 from routes_dashboard import dashboard_bp
 from routes_analytics import analytics_bp
