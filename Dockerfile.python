@@ -14,5 +14,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
+COPY tidb-ca.pem /app/tidb-ca.pem
 
 CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8800} --worker-class gthread --workers 1 --threads 8 --timeout 300 app:app"]

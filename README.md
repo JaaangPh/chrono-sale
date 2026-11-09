@@ -182,11 +182,11 @@ variables on **both** Render application services:
 | `DB_SSL_CA` | Path to the provider's CA certificate file, when TLS verification is required |
 | `FLASK_API_SECRET` | Long random shared secret; use the exact same value on both app services |
 
-If the database provider requires a CA certificate, add it as a Render **Secret
-File** on both services and set `DB_SSL_CA` to the mounted file path. For
-example, if the secret file is mounted at `/etc/secrets/ca.pem`, use that path
-as the variable value. This enables CA and server-identity verification for
-both the PHP and Python database connections.
+The TiDB CA certificate is included as `tidb-ca.pem` in both Docker images.
+Set `DB_SSL_CA` to `/var/www/html/tidb-ca.pem` on the PHP service and
+`/app/tidb-ca.pem` on the Flask service. The Apache configuration blocks direct
+web access to PEM files. If you replace the certificate, update the local file
+and redeploy both services.
 
 Set `FLASK_BASE` on the PHP service to the Flask service's public HTTPS URL.
 Use Render's environment-variable dashboard for credentials. Do not put
