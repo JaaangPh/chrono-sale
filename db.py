@@ -20,6 +20,8 @@ DB_CONFIG = {
 
 DB_SSL_CA = os.getenv("DB_SSL_CA")
 if DB_SSL_CA:
+    if not os.path.isfile(DB_SSL_CA):
+        raise RuntimeError(f"DB_SSL_CA does not point to a readable CA file: {DB_SSL_CA}")
     DB_CONFIG.update({
         "ssl_ca": DB_SSL_CA,
         "ssl_verify_cert": True,
