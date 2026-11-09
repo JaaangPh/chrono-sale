@@ -165,10 +165,12 @@ public API URL unless API authentication is added first.
 
 ### 3. Configure MySQL
 
-Create a managed MySQL database with a provider that allows connections from
-your Render services. Restrict its network access as much as your provider
-allows; do not expose the database to the entire internet. Configure the
-following environment variables on **both** Render application services:
+Create a managed MySQL-compatible database with a provider that allows
+connections from your Render services. Restrict its network access as much as
+your provider allows; do not expose the database to the entire internet.
+Create a dedicated application database (for example, `chrono_sales_db`); do
+not use a system schema such as `sys`. Configure the following environment
+variables on **both** Render application services:
 
 | Variable | MySQL service value |
 | --- | --- |
@@ -177,13 +179,20 @@ following environment variables on **both** Render application services:
 | `DB_NAME` | Database name |
 | `DB_USER` | Database username |
 | `DB_PASSWORD` | Database password |
+| `DB_SSL_CA` | Path to the provider's CA certificate file, when TLS verification is required |
 
-Use Render's environment-variable dashboard for secrets. Do not put credentials
-in GitHub or in this README.
+If the database provider requires a CA certificate, add it as a Render **Secret
+File** on both services and set `DB_SSL_CA` to the mounted file path. For
+example, if the secret file is mounted at `/etc/secrets/ca.pem`, use that path
+as the variable value. This enables CA and server-identity verification for
+both the PHP and Python database connections.
+
+Use Render's environment-variable dashboard for credentials. Do not put
+passwords, connection URLs, or certificate contents in GitHub or this README.
 
 ### 4. Import and secure the database
 
-Import `chrono_sales_db.sql` from your local copy into the managed MySQL
+Import `chrono_sales_db.sql` from your local copy into the dedicated application
 database using a MySQL client. The dump is intentionally excluded from GitHub
 and the Docker image because it contains application data and a seeded admin
 account. Remove any data you do not intend to publish.

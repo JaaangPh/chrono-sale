@@ -18,6 +18,14 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", "3306")),
 }
 
+DB_SSL_CA = os.getenv("DB_SSL_CA")
+if DB_SSL_CA:
+    DB_CONFIG.update({
+        "ssl_ca": DB_SSL_CA,
+        "ssl_verify_cert": True,
+        "ssl_verify_identity": True,
+    })
+
 _training_jobs: dict = {}
 
 def get_db():
