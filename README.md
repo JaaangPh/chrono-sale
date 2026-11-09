@@ -124,85 +124,82 @@ before opening the site to the internet.
 
 ---
 
-## Deploying on Railway with GitHub
+## Deploying on Render with GitHub
 
-This project runs as two Railway services (PHP/Apache and Flask) and a Railway
-MySQL database. Vercel cannot run the PHP application directly. Do not deploy
-`create_dummy.php` as a public script; the included Apache configuration blocks
-it, as well as direct web access to Python, SQL, spreadsheet, and text files.
+The application needs a PHP/Apache web service, a Flask API service, and a
+MySQL database. Render can host the two Docker-based application services, but
+does not provide managed MySQL. Use a separate managed MySQL provider. The
+included PHP Apache configuration blocks direct access to Python, SQL,
+spreadsheet, and text files, as well as `create_dummy.php`.
 
-### 1. Prepare and push the source to GitHub
+The deployment code is already in the GitHub repository. For later changes,
+push to the connected `main` branch; Render can automatically redeploy from it.
+Before sharing the repository, verify that it is private and does not contain
+real sales/customer data or credentials. `.gitignore` excludes SQL dumps,
+spreadsheets, and environment files.
 
-Create a **private** GitHub repository, then from PowerShell in this project:
+### 1. Create the PHP web service
 
-```powershell
-git init
-git add .
-git status
-```
+1. In Render, choose **New → Web Service** and connect the GitHub repository.
+2. Select **Docker** as the runtime.
+3. Set the Dockerfile path to `Dockerfile.php` and the Docker build context to
+   the repository root (`.`).
+4. Choose a region and plan, then create the service. This container listens on
+   port `10000`.
 
-Check that `Sales Report.xlsx`, `chrono_sales_db.sql`, `.env` files, and any
-real customer or sales data are not staged. The repository ignores spreadsheets,
-SQL dumps, and environment files by default. If the staged files are safe:
+### 2. Create the Flask API service
 
-```powershell
-git commit -m "Prepare Chrono Sales for Railway"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/YOUR-REPOSITORY.git
-git push -u origin main
-```
+1. Create a second service from the same GitHub repository. Choose a **Private
+   Service** (not a public web service), select Docker, and set the Dockerfile
+   path to `Dockerfile.python` with build context `.`.
+2. Use the same region as the PHP service so the services can communicate over
+   Render's private network.
+3. Keep the Flask service private. The API does not independently authenticate
+   requests; making it public would expose its endpoints.
+4. Copy the Flask service's internal address from its Render dashboard. Set the
+   PHP service's `FLASK_BASE` to that address, including `http://` and the
+   service port if shown (for example, `http://service-name:10000`).
 
-Replace the URL with your private repository URL.
+Private services may require a paid Render plan. Don't replace this with a
+public API URL unless API authentication is added first.
 
-### 2. Create the Railway services
+### 3. Configure MySQL
 
-1. In Railway, create a project from the GitHub repository.
-2. Add a MySQL database service to the project.
-3. Add a PHP web service using the same GitHub repository. In its **Settings**,
-   set the Dockerfile path to `Dockerfile.php`.
-4. Add a second service using the same repository and set its Dockerfile path to
-   `Dockerfile.python`.
-5. Keep the Flask service private (do not generate a public domain). Generate a
-   public domain only for the PHP web service.
-
-### 3. Set service variables
-
-Add these variables to **both** application services, using Railway's variable
-reference picker to reference the MySQL service's values:
+Create a managed MySQL database with a provider that allows connections from
+your Render services. Restrict its network access as much as your provider
+allows; do not expose the database to the entire internet. Configure the
+following environment variables on **both** Render application services:
 
 | Variable | MySQL service value |
 | --- | --- |
-| `DB_HOST` | `MYSQLHOST` |
-| `DB_PORT` | `MYSQLPORT` |
-| `DB_NAME` | `MYSQLDATABASE` |
-| `DB_USER` | `MYSQLUSER` |
-| `DB_PASSWORD` | `MYSQLPASSWORD` |
+| `DB_HOST` | Database hostname from your provider |
+| `DB_PORT` | Database port from your provider |
+| `DB_NAME` | Database name |
+| `DB_USER` | Database username |
+| `DB_PASSWORD` | Database password |
 
-On the PHP service, set `FLASK_BASE` to the Flask service's private hostname and
-port, in this format: `http://<flask-private-host>:<flask-port>`. Use the
-Railway-provided private domain and port references; do not use localhost or a
-public API URL.
+Use Render's environment-variable dashboard for secrets. Do not put credentials
+in GitHub or in this README.
 
-### 4. Import the database
+### 4. Import and secure the database
 
-Import `chrono_sales_db.sql` from your local copy into the Railway MySQL
+Import `chrono_sales_db.sql` from your local copy into the managed MySQL
 database using a MySQL client. The dump is intentionally excluded from GitHub
 and the Docker image because it contains application data and a seeded admin
-account. Before making the site public, replace the seeded admin password with
-a unique, strong password and remove any data you do not intend to publish.
+account. Remove any data you do not intend to publish.
 
 Generate a password hash in a trusted PHP environment with
 `php -r "echo password_hash('YOUR-UNIQUE-PASSWORD', PASSWORD_DEFAULT), PHP_EOL;"`,
 then update the `users.password_hash` value for the administrator in the
-Railway database. Keep the chosen password and generated hash out of GitHub.
+database. Keep the chosen password and generated hash out of GitHub.
 
 ### 5. Deploy and verify
 
-Deploy both application services. Open the public PHP domain and verify login,
-the dashboard, analytics, data management, and exports. If a database-backed
-page fails, check the service variables and Railway logs for both the PHP and
-Flask services. To publish later changes, push them to the connected GitHub
-branch; Railway will redeploy the services.
+Deploy both application services and generate a public domain for the PHP
+service only. Verify login, the dashboard, analytics, data management, and
+exports. If a database-backed page fails, check the environment variables and
+Render logs for both application services. For future updates, push to the
+connected GitHub branch; Render will redeploy the services.
 
 Never commit production passwords or real customer data to GitHub. The local
 login documented above is for development only.

@@ -5,9 +5,12 @@ RUN apt-get update \
     && docker-php-ext-install curl pdo_mysql \
     && rm -rf /var/lib/apt/lists/*
 
+RUN sed -i 's/Listen 80/Listen 10000/' /etc/apache2/ports.conf \
+    && sed -i 's/:80>/:10000>/' /etc/apache2/sites-available/000-default.conf
+
 COPY docker/apache-chrono.conf /etc/apache2/conf-available/chrono.conf
 RUN a2enconf chrono
 
 COPY . /var/www/html/
 
-EXPOSE 80
+EXPOSE 10000

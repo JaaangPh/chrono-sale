@@ -2,6 +2,7 @@ flask
 flask-cors
 mysql-connector-python
 numpy
+pandas
 scikit-learn
 shap
 openpyxl
